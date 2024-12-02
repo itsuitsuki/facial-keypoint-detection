@@ -103,7 +103,18 @@ class Unflatten(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.activ(self.bn(self.tconv(x)))
 
-
+def heatmap_to_landmarks(heatmaps):
+    B, C, H, W = heatmaps.shape
+    
+    row_indices = torch.arange(H, device=heatmaps.device).view(1, 1, H, 1)  # (1, 1, H, 1)
+    col_indices = torch.arange(W, device=heatmaps.device).view(1, 1, 1, W)  # (1, 1, 1, W)
+    
+    weighted_mean_row = (heatmaps * row_indices).sum(dim=(2, 3))  # (B, C)
+    weighted_mean_col = (heatmaps * col_indices).sum(dim=(2, 3))  # (B, C)
+    
+    weighted_mean_indices = torch.stack([weighted_mean_row, weighted_mean_col], dim=-1)  # (B, C, 2)
+    
+    return weighted_mean_indices
 class PixelwiseClassificationUNet(nn.Module):
     def __init__(
         self,
@@ -132,7 +143,7 @@ class PixelwiseClassificationUNet(nn.Module):
         self.conv1 = Conv(2 * num_hiddens, num_hiddens)  # (B, 128, 224, 224)
         self.conv2 = nn.Conv2d(num_hiddens, num_classes, 1)  # (B, 68, 224, 224)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_heatmap=False) -> torch.Tensor:
         # x: (B, 1, 224, 224)
         assert x.shape[2] == self.height and x.shape[3] == self.width
         # skip connections
@@ -146,6 +157,17 @@ class PixelwiseClassificationUNet(nn.Module):
         x = self.conv1(torch.cat([xup2, x], dim=1)) # (B, 2D, 224, 224) -> (B, D, 224, 224)
         logits = self.conv2(x) # (B, D, 224, 224) -> (B, 68, 224, 224)
         # softmax for every i in 68, over (224, 224) for each batch
-        # probs = torch.softmax(logits, dim=1)
-        return logits
         
+        # SOFTMAX OVER 224x224
+        logits = logits.view(-1, 68, 224*224) # (B, 68, 224*224)
+        if return_heatmap:
+            return logits # to be sigmoided
+        probs = torch.softmax(logits, dim=2)
+        probs = probs.view(-1, 68, 224, 224)
+        with torch.no_grad():
+            # ensure sum of probs over 224x224 is 1
+            sum_over = torch.sum(probs, dim=(2, 3), keepdim=True) # (B, 68, 1, 1)
+            assert torch.allclose(sum_over, torch.ones_like(sum_over))
+        # probs: (B, 68, 224, 224)
+        # should return (B, 68, 2) for each batch
+        return heatmap_to_landmarks(probs) / 224.0
