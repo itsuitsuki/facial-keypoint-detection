@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+ibug_300W_large_face_landmark_dataset/
 
 # C extensions
 *.so
