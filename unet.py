@@ -184,7 +184,7 @@ class PixelwiseClassificationUNet(nn.Module):
         self.conv1 = Conv(2 * num_hiddens, num_hiddens)  # (B, 128, 224, 224)
         self.conv2 = nn.Conv2d(num_hiddens, num_classes, 1)  # (B, 68, 224, 224)
 
-    def forward(self, x: torch.Tensor, return_heatmap=False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_heatmap=True) -> torch.Tensor:
         # x: (B, 1, 224, 224)
         assert x.shape[2] == self.height and x.shape[3] == self.width
         # skip connections
