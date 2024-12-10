@@ -1,0 +1,992 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# I. Data Preprocessing"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import xml.etree.ElementTree as ET \n",
+    "import numpy as np\n",
+    "import os \n",
+    "\n",
+    "tree = ET.parse('ibug_300W_large_face_landmark_dataset/labels_ibug_300W_train.xml')\n",
+    "root = tree.getroot()\n",
+    "root_dir = 'ibug_300W_large_face_landmark_dataset'\n",
+    "\n",
+    "bboxes = [] # face bounding box used to crop the image\n",
+    "landmarks = [] # the facial keypoints/landmarks for the whole training dataset\n",
+    "img_filenames = [] # the image names for the whole dataset\n",
+    "\n",
+    "for filename in root[2]:\n",
+    "\timg_filenames.append(os.path.join(root_dir, filename.attrib['file']))\n",
+    "\tbox = filename[0].attrib\n",
+    "\t# x, y for the top left corner of the box, w, h for box width and height\n",
+    "\tbboxes.append([box['left'], box['top'], box['width'], box['height']]) \n",
+    "\n",
+    "\tlandmark = []\n",
+    "\tfor num in range(68):\n",
+    "\t\tx_coordinate = int(filename[0][num].attrib['x'])\n",
+    "\t\ty_coordinate = int(filename[0][num].attrib['y'])\n",
+    "\t\tlandmark.append([x_coordinate, y_coordinate])\n",
+    "\tlandmarks.append(landmark) # relative? \n",
+    "\n",
+    "landmarks = np.array(landmarks).astype('float32')\n",
+    "bboxes = np.array(bboxes).astype('float32') "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# build a dataset\n",
+    "import torch\n",
+    "from torch.utils.data import Dataset, DataLoader\n",
+    "from PIL import Image\n",
+    "import torchvision.transforms as transforms\n",
+    "\n",
+    "import numpy\n",
+    "import random\n",
+    "\n",
+    "import albumentations as A\n",
+    "from albumentations.pytorch import ToTensorV2\n",
+    "\n",
+    "def seed_everything(seed):\n",
+    "    os.environ['PYTHONHASHSEED'] = str(seed)\n",
+    "    np.random.seed(seed)\n",
+    "    random.seed(seed)\n",
+    "    torch.manual_seed(seed)\n",
+    "    torch.cuda.manual_seed(seed)\n",
+    "    torch.cuda.manual_seed_all(seed)\n",
+    "    torch.backends.cudnn.deterministic = True\n",
+    "    torch.backends.cudnn.benchmark = False\n",
+    "    \n",
+    "seed_everything(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class IbugTrainingHeatmapDataset(Dataset):\n",
+    "    def __init__(self, img_filenames, bboxes, landmarks, normalize=True, basic_transform=None, albu_transform=None, sigma=1):\n",
+    "        self.img_filenames = img_filenames\n",
+    "        self.bboxes = bboxes\n",
+    "        self.landmarks = landmarks\n",
+    "        self.basic_transform = basic_transform # resize, totensor, normalize\n",
+    "        self.albu_transform = albu_transform # albumentations\n",
+    "        self.normalize = normalize\n",
+    "        self.sigma = sigma\n",
+    "        if not self.normalize:\n",
+    "            print('Not normalizing the image')\n",
+    "        if not self.basic_transform:\n",
+    "            print('No basic transformation')\n",
+    "        \n",
+    "    def __len__(self):\n",
+    "        return len(self.img_filenames)\n",
+    "    \n",
+    "    def __getitem__(self, idx):\n",
+    "        img_path = self.img_filenames[idx]\n",
+    "        opened_img = Image.open(img_path).convert('L') # range [0, 255] # shape (H, W)\n",
+    "        bounding_box = self.bboxes[idx]\n",
+    "        landmark_ori = self.landmarks[idx] # (68, 2)\n",
+    "        x, y, w, h = bounding_box # left, top, width, height\n",
+    "        cropped_by_bbox = opened_img.crop((x, y, x+w, y+h)) # shape (h, w)\n",
+    "\n",
+    "        cropped_by_bbox = np.array(cropped_by_bbox) # range [0, 255] # shape (H, W)\n",
+    "        cropped_by_bbox = np.expand_dims(cropped_by_bbox, axis=2) # shape (H, W, 1)\n",
+    "        # to float32\n",
+    "        cropped_by_bbox = cropped_by_bbox.astype(np.float32) # shape (H, W, C)\n",
+    "        if self.normalize:\n",
+    "            cropped_by_bbox = cropped_by_bbox / 255.0 - 0.5 # range [-0.5, 0.5]\n",
+    "            # print(cropped_by_bbox.dtype)\n",
+    "        # adjust the landmark\n",
+    "        # landmark2 = landmark - [x, y] # FIXME: broadcast?\n",
+    "        landmark = np.zeros_like(landmark_ori)\n",
+    "        landmark[:, 0] = landmark_ori[:, 0] - x\n",
+    "        landmark[:, 1] = landmark_ori[:, 1] - y\n",
+    "        # assert np.all(landmark == landmark2)\n",
+    "        \n",
+    "        \n",
+    "        # to relative coordinates\n",
+    "        if self.albu_transform:\n",
+    "            transformed = self.albu_transform(image=cropped_by_bbox, keypoints=landmark)\n",
+    "            tfed_im = transformed['image'] # 68 tokens and each token has 224*224 classes\n",
+    "            landmark = transformed['keypoints']\n",
+    "        landmark[:, 1] = landmark[:, 1] / h \n",
+    "        landmark[:, 0] = landmark[:, 0] / w \n",
+    "        # print(tfed_im.shape, w, h)\n",
+    "        # tfed_im = torch.tensor(tfed_im)\n",
+    "        # print(tfed_im.shape)\n",
+    "        if self.basic_transform:\n",
+    "            tfed_im = self.basic_transform(tfed_im) # tfed_im: (C, 224, 224)\n",
+    "        else:\n",
+    "            tfed_im = torch.tensor(tfed_im)\n",
+    "        # heatmap should be (68, 224, 224)\n",
+    "        heatmap = self._gaussian_heatmap(landmark * 224, 224, 224, 68)\n",
+    "        heatmap = torch.tensor(heatmap)\n",
+    "        heatmap = heatmap.float()\n",
+    "        landmark = torch.tensor(landmark)\n",
+    "        return tfed_im, heatmap, landmark # tfed_im: (C=1, 224, 224), heatmap: (68, 224, 224), landmark: (68, 2)\n",
+    "    \n",
+    "    def _gaussian_heatmap(self, landmark, height, width, channels):\n",
+    "        heatmap = np.ones((channels, height, width)).astype(np.float32)\n",
+    "        # landmark: (68, 2)\n",
+    "        for i, (x, y) in enumerate(landmark):\n",
+    "            if x < 0 or y < 0 or x >= width or y >= height:\n",
+    "                # all 1s so that loss is 0\n",
+    "                continue\n",
+    "            x_coords = np.arange(width) # from 0 to width-1\n",
+    "            y_coords = np.arange(height) # 68 tokens and each token has 224*224 classes\n",
+    "            x_coords, y_coords = np.meshgrid(x_coords, y_coords)\n",
+    "            heatmap[i] = np.exp(-((x_coords - x) ** 2 + (y_coords - y) ** 2) / (2 * self.sigma ** 2))\n",
+    "            # optional: normalize the heatmap by max or sum\n",
+    "            # heatmap[i] = heatmap[i] / np.sum(heatmap[i])\n",
+    "        return heatmap\n",
+    "    \n",
+    "    \n",
+    "basic_transform = transforms.Compose([\n",
+    "    transforms.ToPILImage(),\n",
+    "    transforms.Resize((224, 224)), # From (C, H, W) to (C, 224, 224)\n",
+    "    # grayscale\n",
+    "    transforms.Grayscale(num_output_channels=1),\n",
+    "    transforms.ToTensor(),\n",
+    "    # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])\n",
+    "])\n",
+    "\n",
+    "transform = A.Compose([\n",
+    "    A.Affine(rotate=(-15, 15), translate_percent={'x': 0.1, 'y': 0.1}),\n",
+    "    # A.GaussNoise(p=0.5), # DO WE NEED THIS?\n",
+    "    A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),\n",
+    "    ToTensorV2(),\n",
+    "], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))\n",
+    "\n",
+    "dataset = IbugTrainingHeatmapDataset(img_filenames, bboxes, landmarks, basic_transform=basic_transform, albu_transform=transform, normalize=True, sigma=1)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# II. Model Architecture\n",
+    "We use a UNet predicting the probability density heatmap (shape [68, 224, 224]) of the face landmarks, and then find the expected position of the landmarks w.r.t. the heatmap,\n",
+    "i.e. a pixelwise classification problem."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# unet\n",
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import torch.nn.functional as F\n",
+    "# load unet\n",
+    "from unet import PixelwiseClassificationUNet"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Number of parameters: 2409908\n"
+     ]
+    }
+   ],
+   "source": [
+    "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
+    "model = PixelwiseClassificationUNet(1, 68, 72).to(device)\n",
+    "def init_weights(m):\n",
+    "    if type(m) == nn.Conv2d:\n",
+    "        nn.init.kaiming_normal_(m.weight)\n",
+    "        nn.init.zeros_(m.bias)\n",
+    "model.apply(init_weights)\n",
+    "n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n",
+    "print(f'Number of parameters: {n_params}')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# III. Training"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "\n",
+    "from tqdm import tqdm\n",
+    "LR = 1e-3\n",
+    "BS = 16\n",
+    "optimizer = torch.optim.Adam(model.parameters(), lr=LR)\n",
+    "num_epochs = 30\n",
+    "criterion = nn.MSELoss()\n",
+    "mae = nn.L1Loss()\n",
+    "\n",
+    "train_dataset, val_dataset = torch.utils.data.random_split(dataset, [int(len(dataset) * 0.8), len(dataset) - int(len(dataset) * 0.8)])\n",
+    "train_loader = DataLoader(train_dataset, batch_size=BS, shuffle=True, num_workers=16)\n",
+    "val_loader = DataLoader(val_dataset, batch_size=BS, shuffle=False, num_workers=16)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "Epoch [1/30]: 100%|██████████| 334/334 [02:17<00:00,  2.42it/s, mae=16.5, train_loss=0.00905]\n",
+      "Epoch [1/30]: 100%|██████████| 84/84 [00:24<00:00,  3.49it/s, mae=12.2, val_loss=0.00481]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 1, Train Loss: 0.010969726476835053, Val Loss: 0.005435942245336871\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [2/30]: 100%|██████████| 334/334 [02:19<00:00,  2.39it/s, mae=15.3, train_loss=0.0067] \n",
+      "Epoch [2/30]: 100%|██████████| 84/84 [00:23<00:00,  3.58it/s, mae=12.3, val_loss=0.00504]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 2, Train Loss: 0.00563011615408841, Val Loss: 0.0056964997811952515\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [3/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=12.5, train_loss=0.00494]\n",
+      "Epoch [3/30]: 100%|██████████| 84/84 [00:24<00:00,  3.40it/s, mae=11.7, val_loss=0.0045] "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 3, Train Loss: 0.005531313762899689, Val Loss: 0.005507634123898156\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [4/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=10.2, train_loss=0.00326]\n",
+      "Epoch [4/30]: 100%|██████████| 84/84 [00:24<00:00,  3.50it/s, mae=11.5, val_loss=0.00438]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 4, Train Loss: 0.005411045891400092, Val Loss: 0.005481550212217761\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [5/30]: 100%|██████████| 334/334 [02:21<00:00,  2.36it/s, mae=9.8, train_loss=0.00332] \n",
+      "Epoch [5/30]: 100%|██████████| 84/84 [00:24<00:00,  3.48it/s, mae=12.1, val_loss=0.00488]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 5, Train Loss: 0.005379487749211445, Val Loss: 0.005374456470322218\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [6/30]: 100%|██████████| 334/334 [02:19<00:00,  2.39it/s, mae=11.4, train_loss=0.00384]\n",
+      "Epoch [6/30]: 100%|██████████| 84/84 [00:24<00:00,  3.49it/s, mae=11.4, val_loss=0.00435]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 6, Train Loss: 0.0052626588469661196, Val Loss: 0.005115697027317115\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [7/30]: 100%|██████████| 334/334 [02:19<00:00,  2.40it/s, mae=13, train_loss=0.00562]  \n",
+      "Epoch [7/30]: 100%|██████████| 84/84 [00:24<00:00,  3.48it/s, mae=11.9, val_loss=0.00463]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 7, Train Loss: 0.0051296811298506256, Val Loss: 0.005005192225022863\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [8/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=11.9, train_loss=0.00443]\n",
+      "Epoch [8/30]: 100%|██████████| 84/84 [00:23<00:00,  3.53it/s, mae=11, val_loss=0.00406]  "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 8, Train Loss: 0.00499377280130737, Val Loss: 0.004896362289963733\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [9/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=9.51, train_loss=0.00289]\n",
+      "Epoch [9/30]: 100%|██████████| 84/84 [00:24<00:00,  3.49it/s, mae=11.4, val_loss=0.00443]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 9, Train Loss: 0.004856695126167716, Val Loss: 0.004731630875972942\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [10/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=12.2, train_loss=0.00473]\n",
+      "Epoch [10/30]: 100%|██████████| 84/84 [00:23<00:00,  3.54it/s, mae=11.6, val_loss=0.00449]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 10, Train Loss: 0.004699312693517499, Val Loss: 0.0047028449702165315\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [11/30]: 100%|██████████| 334/334 [02:19<00:00,  2.39it/s, mae=12.3, train_loss=0.00471]\n",
+      "Epoch [11/30]: 100%|██████████| 84/84 [00:23<00:00,  3.55it/s, mae=10.5, val_loss=0.00371]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 11, Train Loss: 0.00455637540581809, Val Loss: 0.0044474554541964265\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [12/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=11.9, train_loss=0.00536]\n",
+      "Epoch [12/30]: 100%|██████████| 84/84 [00:23<00:00,  3.54it/s, mae=11.9, val_loss=0.00456]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 12, Train Loss: 0.0044137343386478145, Val Loss: 0.0045533192571296935\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [13/30]: 100%|██████████| 334/334 [02:19<00:00,  2.40it/s, mae=9.14, train_loss=0.00376]\n",
+      "Epoch [13/30]: 100%|██████████| 84/84 [00:23<00:00,  3.52it/s, mae=10.6, val_loss=0.00401]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 13, Train Loss: 0.0042368402811949575, Val Loss: 0.004155690759597789\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [14/30]: 100%|██████████| 334/334 [02:19<00:00,  2.40it/s, mae=10.2, train_loss=0.00423]\n",
+      "Epoch [14/30]: 100%|██████████| 84/84 [00:24<00:00,  3.44it/s, mae=10.7, val_loss=0.00386]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 14, Train Loss: 0.004085329037806588, Val Loss: 0.004101650390241828\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [15/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=9.3, train_loss=0.00318] \n",
+      "Epoch [15/30]: 100%|██████████| 84/84 [00:24<00:00,  3.47it/s, mae=10.7, val_loss=0.00394]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 15, Train Loss: 0.003929522860248735, Val Loss: 0.003949147080891721\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [16/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=6.18, train_loss=0.00124]\n",
+      "Epoch [16/30]: 100%|██████████| 84/84 [00:23<00:00,  3.54it/s, mae=9.89, val_loss=0.00345]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 16, Train Loss: 0.0037887787051125244, Val Loss: 0.003947572408443583\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [17/30]: 100%|██████████| 334/334 [02:19<00:00,  2.40it/s, mae=9.43, train_loss=0.00295]\n",
+      "Epoch [17/30]: 100%|██████████| 84/84 [00:23<00:00,  3.53it/s, mae=9.91, val_loss=0.00342]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 17, Train Loss: 0.003713293431862118, Val Loss: 0.0038041300944141334\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [18/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=9.61, train_loss=0.00329]\n",
+      "Epoch [18/30]: 100%|██████████| 84/84 [00:23<00:00,  3.58it/s, mae=10.1, val_loss=0.0036] "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 18, Train Loss: 0.0035923162404124342, Val Loss: 0.0037173776321911384\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [19/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=9.37, train_loss=0.00302]\n",
+      "Epoch [19/30]: 100%|██████████| 84/84 [00:24<00:00,  3.50it/s, mae=9.35, val_loss=0.00328]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 19, Train Loss: 0.0034981165771389346, Val Loss: 0.0036517329863272607\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [20/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=9.03, train_loss=0.00289]\n",
+      "Epoch [20/30]: 100%|██████████| 84/84 [00:24<00:00,  3.44it/s, mae=9.48, val_loss=0.0034] "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 20, Train Loss: 0.0033992103692757603, Val Loss: 0.0037289736044060972\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [21/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=7.07, train_loss=0.00176]\n",
+      "Epoch [21/30]: 100%|██████████| 84/84 [00:23<00:00,  3.53it/s, mae=10.2, val_loss=0.00365]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 21, Train Loss: 0.0033108054396757732, Val Loss: 0.003460317916635956\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [22/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=11.2, train_loss=0.00418]\n",
+      "Epoch [22/30]: 100%|██████████| 84/84 [00:23<00:00,  3.57it/s, mae=9.5, val_loss=0.0033]  "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 22, Train Loss: 0.0032651684052467035, Val Loss: 0.003353077225342748\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [23/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=8.33, train_loss=0.00239]\n",
+      "Epoch [23/30]: 100%|██████████| 84/84 [00:23<00:00,  3.51it/s, mae=9.33, val_loss=0.00319]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 23, Train Loss: 0.003161968355217647, Val Loss: 0.003371865494132397\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [24/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=7.25, train_loss=0.00186]\n",
+      "Epoch [24/30]: 100%|██████████| 84/84 [00:24<00:00,  3.45it/s, mae=8.94, val_loss=0.003]  "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 24, Train Loss: 0.0030927631988686448, Val Loss: 0.0032916192431002855\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [25/30]: 100%|██████████| 334/334 [02:20<00:00,  2.37it/s, mae=7.91, train_loss=0.00249]\n",
+      "Epoch [25/30]: 100%|██████████| 84/84 [00:24<00:00,  3.42it/s, mae=9.06, val_loss=0.00312]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 25, Train Loss: 0.0030378443387638174, Val Loss: 0.003241983477935372\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [26/30]: 100%|██████████| 334/334 [02:21<00:00,  2.36it/s, mae=7.27, train_loss=0.00189]\n",
+      "Epoch [26/30]: 100%|██████████| 84/84 [00:24<00:00,  3.42it/s, mae=9.02, val_loss=0.003]  "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 26, Train Loss: 0.0029920081787151533, Val Loss: 0.0032905920053876584\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [27/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=9.11, train_loss=0.00274]\n",
+      "Epoch [27/30]: 100%|██████████| 84/84 [00:25<00:00,  3.33it/s, mae=9.19, val_loss=0.0032] "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 27, Train Loss: 0.0029195069361890773, Val Loss: 0.003187960997733864\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [28/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=8.72, train_loss=0.00247]\n",
+      "Epoch [28/30]: 100%|██████████| 84/84 [00:24<00:00,  3.38it/s, mae=9.05, val_loss=0.0031] "
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 28, Train Loss: 0.0028941785933416404, Val Loss: 0.0031570998447326324\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [29/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=8.46, train_loss=0.00304]\n",
+      "Epoch [29/30]: 100%|██████████| 84/84 [00:24<00:00,  3.41it/s, mae=8.69, val_loss=0.00292]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 29, Train Loss: 0.0028453234267354147, Val Loss: 0.003122649538064642\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Epoch [30/30]: 100%|██████████| 334/334 [02:20<00:00,  2.38it/s, mae=9.44, train_loss=0.003]  \n",
+      "Epoch [30/30]: 100%|██████████| 84/84 [00:23<00:00,  3.52it/s, mae=8.83, val_loss=0.00301]"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 30, Train Loss: 0.0027959737215681882, Val Loss: 0.0031119356890918597\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "import warnings\n",
+    "warnings.filterwarnings(\"ignore\")\n",
+    "# train\n",
+    "train_losses = []\n",
+    "val_losses = []\n",
+    "\n",
+    "for epoch in range(num_epochs):\n",
+    "    model.train()\n",
+    "    train_loss = 0\n",
+    "    train_mae = 0\n",
+    "    loop = tqdm(enumerate(train_loader), total=len(train_loader), leave=True)\n",
+    "    loop.set_description(f'Epoch [{epoch+1}/{num_epochs}]')\n",
+    "    for i, (images, heatmaps, landmark) in loop:\n",
+    "        # bad heatmap -> jump to next iteration\n",
+    "        # i.e. < 1e-4\n",
+    "        # if torch.sum(heatmaps) < 1e-4:\n",
+    "        #     continue\n",
+    "        images = images.to(device) # shape: (B, C, H, W)\n",
+    "        landmark = landmark.to(device) # shape: (B, 68, 2)\n",
+    "        \n",
+    "        # Forward pass\n",
+    "        predicted_landmark = model(images) # shape: (B, 68, 2)\n",
+    "        loss = criterion(predicted_landmark, landmark)\n",
+    "        # learn the heatmap: not what we are doing now\n",
+    "        # pred_heatmap = model(images, return_heatmap=True) # shape: (B, 68, H*W)\n",
+    "        # do BCE\n",
+    "        # heatmaps = heatmaps.view(-1, 68, 224*224) # shape: (B, 68, H*W)\n",
+    "        # loss = bce(pred_heatmap, heatmaps)\n",
+    "        with torch.no_grad():\n",
+    "            mae_loss = mae(predicted_landmark, landmark) * 224\n",
+    "            train_mae += mae_loss.item()\n",
+    "        # Backward and optimize\n",
+    "        optimizer.zero_grad()\n",
+    "        loss.backward()\n",
+    "        optimizer.step()\n",
+    "        train_loss += loss.item()\n",
+    "        loop.set_postfix(train_loss=loss.item(), mae=mae_loss.item())\n",
+    "\n",
+    "    train_loss /= len(train_loader)\n",
+    "    train_losses.append(train_loss)\n",
+    "    train_mae /= len(train_loader)\n",
+    "    # validation\n",
+    "    model.eval()\n",
+    "    val_loss = 0\n",
+    "    val_mae = 0\n",
+    "    loop = tqdm(enumerate(val_loader), total=len(val_loader), leave=True)\n",
+    "    loop.set_description(f'Epoch [{epoch+1}/{num_epochs}]')\n",
+    "    with torch.no_grad():\n",
+    "        for i, (images, heatmaps, landmark) in loop:\n",
+    "            images = images.to(device) # shape: (B, C, H, W)\n",
+    "            heatmaps = heatmaps.to(device) # shape: (B, 68, H, W)\n",
+    "            landmark = landmark.to(device) # shape: (B, 68, 2)\n",
+    "            # Forward pass\n",
+    "            predicted_landmark = model(images)\n",
+    "            loss = criterion(predicted_landmark, landmark)\n",
+    "            mae_loss = mae(predicted_landmark, landmark) * 224\n",
+    "            val_mae += mae_loss.item()\n",
+    "            val_loss += loss.item()\n",
+    "            loop.set_postfix(val_loss=loss.item(), mae=mae_loss.item())\n",
+    "            \n",
+    "    val_loss /= len(val_loader)\n",
+    "    val_mae /= len(val_loader)\n",
+    "    val_losses.append(val_loss)\n",
+    "    print(f'Epoch {epoch+1}, Train Loss: {train_loss}, Val Loss: {val_loss}, Train MAE: {train_mae}, Val MAE: {val_mae}')\n",
+    "        "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(1008, 4)\n",
+      "1008\n",
+      "ibug_300W_large_face_landmark_dataset/helen/trainset/146827737_1.jpg\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "100%|██████████| 63/63 [00:32<00:00,  1.95it/s]\n"
+     ]
+    }
+   ],
+   "source": [
+    "\n",
+    "\n",
+    "# %pip install pandas\n",
+    "import xml.etree.ElementTree as ET \n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import os \n",
+    "\n",
+    "tree = ET.parse('ibug_300W_large_face_landmark_dataset/labels_ibug_300W_test_parsed.xml')\n",
+    "root = tree.getroot()\n",
+    "root_dir = 'ibug_300W_large_face_landmark_dataset'\n",
+    "\n",
+    "bboxes = [] # face bounding box used to crop the image\n",
+    "img_filenames = [] # the image names for the whole dataset\n",
+    "\n",
+    "for filename in root[2]:\n",
+    "\timg_filenames.append(os.path.join(root_dir, filename.attrib['file']))\n",
+    "\tbox = filename[0].attrib\n",
+    "\t# x, y for the top left corner of the box, w, h for box width and height\n",
+    "\tbboxes.append([box['left'], box['top'], box['width'], box['height']]) \n",
+    "\n",
+    "bboxes = np.array(bboxes).astype('float32') \n",
+    "print(bboxes.shape)\n",
+    "print(len(img_filenames))\n",
+    "print(img_filenames[0])\n",
+    "\n",
+    "# we now have img_filenames and bboxes\n",
+    "# for every i in range(len(img_filenames)), \n",
+    "# we crop the image, resize it to (224, 224), and then feed it to the model\n",
+    "# the output is the landmarks in shape (68, 2)\n",
+    "class IBugTestDataset(Dataset):\n",
+    "    def __init__(self, img_filenames, bboxes, normalize=True, basic_transform=None):\n",
+    "        self.img_filenames = img_filenames\n",
+    "        self.bboxes = bboxes\n",
+    "        self.basic_transform = basic_transform # resize, totensor\n",
+    "        self.normalize = normalize\n",
+    "        \n",
+    "    def __len__(self):\n",
+    "        return len(self.img_filenames)\n",
+    "    \n",
+    "    def __getitem__(self, idx):\n",
+    "        img_path = self.img_filenames[idx]\n",
+    "        # grayscale\n",
+    "        opened_img = Image.open(img_path).convert('RGB') # range [0, 255] # shape (H, W, C)\n",
+    "        bounding_box = self.bboxes[idx]\n",
+    "        x, y, w, h = bounding_box # left, top, width, height\n",
+    "        cropped_by_bbox = opened_img.crop((x, y, x+w, y+h))\n",
+    "        cropped_by_bbox = np.array(cropped_by_bbox) # range [0, 255]\n",
+    "        if self.normalize:\n",
+    "            cropped_by_bbox = cropped_by_bbox / 255.0 - 0.5\n",
+    "            \n",
+    "        if self.basic_transform:\n",
+    "            cropped_by_bbox = self.basic_transform(cropped_by_bbox)\n",
+    "        else:\n",
+    "            cropped_by_bbox = torch.tensor(cropped_by_bbox).permute(2, 0, 1) # (C, H, W)\n",
+    "        return cropped_by_bbox, bounding_box\n",
+    "    \n",
+    "basic_transform = transforms.Compose([\n",
+    "    transforms.ToPILImage(),\n",
+    "    transforms.Resize((224, 224)), # From (C, H, W) to (C, 224, 224)\n",
+    "    # grayscale\n",
+    "    transforms.Grayscale(num_output_channels=1), # From (C, H, W) to (1, H, W)\n",
+    "    transforms.ToTensor(),\n",
+    "    # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])\n",
+    "])\n",
+    "\n",
+    "test_dataset = IBugTestDataset(img_filenames, bboxes, basic_transform=basic_transform)\n",
+    "test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=BS, shuffle=False)\n",
+    "\n",
+    "# test\n",
+    "model.eval()\n",
+    "preds = []\n",
+    "with torch.no_grad():\n",
+    "    for (images, bbox) in tqdm(test_loader):\n",
+    "        images = images.to(device)\n",
+    "        predicted_landmarks = model(images) # [0, 1]\n",
+    "        x, y, w, h = bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3]\n",
+    "        # to devices\n",
+    "        x, y, w, h = x.to(device), y.to(device), w.to(device), h.to(device)\n",
+    "        # adjust the landmark\n",
+    "        predicted_landmarks[:, :, 0] = predicted_landmarks[:, :, 0] * w[:, None] + x[:, None]\n",
+    "        predicted_landmarks[:, :, 1] = predicted_landmarks[:, :, 1] * h[:, None] + y[:, None]\n",
+    "        preds.append(predicted_landmarks)\n",
+    "preds = torch.cat(preds, dim=0) # (N, 68, 2)\n",
+    "# preds = preds.cpu().numpy()\n",
+    "# preds = preds.tolist()\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "total 3224\n",
+      "-rw-rw-r-- 1 it it 3299329 12月  1 23:02 submission.csv\n",
+      "100%|██████████████████████████████████████| 3.15M/3.15M [00:01<00:00, 1.79MB/s]\n",
+      "Successfully submitted to CS194-26 Fall 2022 Project 5"
+     ]
+    }
+   ],
+   "source": [
+    "alternating_names = [] # should be 136 * test_size(1008) = 137088\n",
+    "alternating_values = []\n",
+    "counter = 0\n",
+    "for i in range(len(preds)):\n",
+    "    pred = preds[i] # (68, 2)\n",
+    "    # to list\n",
+    "    pred = pred.cpu().numpy().tolist()\n",
+    "    \n",
+    "    for j in range(68):\n",
+    "        # alternating_names.append(f'image_{i+1}_keypoints_{j+1}_x')\n",
+    "        alternating_names.append(str(counter))\n",
+    "        counter += 1\n",
+    "        alternating_names.append(str(counter))\n",
+    "        counter += 1\n",
+    "        # alternating_names.append(f'image_{i+1}_keypoints_{j+1}_y')\n",
+    "        \n",
+    "        alternating_values.append(pred[j][0]) # x\n",
+    "        alternating_values.append(pred[j][1]) # y\n",
+    "        \n",
+    "        \n",
+    "        \n",
+    "df = pd.DataFrame({'Id': alternating_names, 'Predicted': alternating_values})\n",
+    "\n",
+    "os.makedirs('4', exist_ok=True)\n",
+    "df.to_csv('4/submission.csv', index=False)\n",
+    "!cd 4 && ls -l && kaggle competitions submit -c cs194-26-fall-2022-project-5 -f submission.csv -m \"UNet, 30 epochs, 1e-3 LR, 16 BS, 64 hidden channels\"\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "180",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.5"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}

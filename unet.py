@@ -103,18 +103,59 @@ class Unflatten(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.activ(self.bn(self.tconv(x)))
 
-def heatmap_to_landmarks(heatmaps):
+def heatmap_to_landmarks_mean(heatmaps):
     B, C, H, W = heatmaps.shape
     
     row_indices = torch.arange(H, device=heatmaps.device).view(1, 1, H, 1)  # (1, 1, H, 1)
     col_indices = torch.arange(W, device=heatmaps.device).view(1, 1, 1, W)  # (1, 1, 1, W)
     
-    weighted_mean_row = (heatmaps * row_indices).sum(dim=(2, 3))  # (B, C)
-    weighted_mean_col = (heatmaps * col_indices).sum(dim=(2, 3))  # (B, C)
+    weighted_mean_row = (heatmaps * row_indices).sum(dim=(2, 3)) / heatmaps.sum(dim=(2, 3))  # (B, C)
+    weighted_mean_col = (heatmaps * col_indices).sum(dim=(2, 3)) / heatmaps.sum(dim=(2, 3))  # (B, C)
     
     weighted_mean_indices = torch.stack([weighted_mean_row, weighted_mean_col], dim=-1)  # (B, C, 2)
-    
+    # print(weighted_mean_indices)
     return weighted_mean_indices
+
+
+def heatmap_to_landmarks_max(heatmaps):
+    B, C, H, W = heatmaps.shape
+    
+    # max_indices = heatmaps.view(B, C, -1).argmax(dim=-1)  # (B, C)
+    
+    # row_indices = max_indices // W  # (B, C)
+    # col_indices = max_indices % W  # (B, C)
+    
+    # max_indices = torch.stack([row_indices, col_indices], dim=-1)  # (B, C, 2)
+    
+    # find 4 largest indices for each heatmap in (B,C)
+    max_indices = torch.topk(heatmaps.view(B, C, -1), 4, dim=-1).indices # (B, C, 4)
+    top_values = torch.topk(heatmaps.view(B, C, -1), 4, dim=-1).values # (B, C, 4)
+    # back to 2D: (B, C, 4) -> (B, C, 4, 2)
+    row_indices = max_indices // W  # (B, C, 4)
+    col_indices = max_indices % W  # (B, C, 4)
+    # max_indices = torch.stack([row_indices, col_indices], dim=-1)  # (B, C, 4, 2)
+    top_prob = top_values / top_values.sum(dim=-1, keepdim=True)
+    
+    # should aggregate the indices by normalized means to get the final 2 indices
+    # (B, C, 4, 2) -> (B, C, 2)
+    # weighted mean by the heatmap values
+    # p1 * (r1, c1) + p2 * (r2, c2) + p3 * (r3, c3) + p4 * (r4, c4)
+    # (p1*r1 + p2*r2 + p3*r3 + p4*r4, p1*c1 + p2*c2 + p3*c3 + p4*c4)
+    weighted_mean_row = (row_indices * top_prob).sum(dim=-1)  # (B, C)
+    weighted_mean_col = (col_indices * top_prob).sum(dim=-1)  # (B, C)
+    
+    soft_argmax_indices = torch.stack([weighted_mean_row, weighted_mean_col], dim=-1)  # (B, C, 2)
+    
+    
+    return soft_argmax_indices
+
+def heatmap_to_landmarks(heatmaps, method='max'):
+    if method == 'mean':
+        return heatmap_to_landmarks_mean(heatmaps)
+    elif method == 'max':
+        return heatmap_to_landmarks_max(heatmaps)
+    else:
+        raise ValueError(f"Invalid method: {method}")
 class PixelwiseClassificationUNet(nn.Module):
     def __init__(
         self,
@@ -170,4 +211,4 @@ class PixelwiseClassificationUNet(nn.Module):
             assert torch.allclose(sum_over, torch.ones_like(sum_over))
         # probs: (B, 68, 224, 224)
         # should return (B, 68, 2) for each batch
-        return heatmap_to_landmarks(probs) / 224.0
+        return heatmap_to_landmarks_mean(probs) / 224.0
