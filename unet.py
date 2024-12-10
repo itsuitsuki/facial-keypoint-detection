@@ -144,7 +144,7 @@ def heatmap_to_landmarks_max(heatmaps):
     weighted_mean_row = (row_indices * top_prob).sum(dim=-1)  # (B, C)
     weighted_mean_col = (col_indices * top_prob).sum(dim=-1)  # (B, C)
     
-    soft_argmax_indices = torch.stack([weighted_mean_row, weighted_mean_col], dim=-1)  # (B, C, 2)
+    soft_argmax_indices = torch.stack([weighted_mean_col, weighted_mean_row], dim=-1)  # (B, C, 2)
     
     
     return soft_argmax_indices
