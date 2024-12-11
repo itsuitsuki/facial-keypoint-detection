@@ -203,12 +203,12 @@ class PixelwiseClassificationUNet(nn.Module):
         logits = logits.view(-1, 68, 224*224) # (B, 68, 224*224)
         if return_heatmap:
             return logits # to be sigmoided
-        probs = torch.softmax(logits, dim=2)
-        probs = probs.view(-1, 68, 224, 224)
-        with torch.no_grad():
-            # ensure sum of probs over 224x224 is 1
-            sum_over = torch.sum(probs, dim=(2, 3), keepdim=True) # (B, 68, 1, 1)
-            assert torch.allclose(sum_over, torch.ones_like(sum_over))
-        # probs: (B, 68, 224, 224)
-        # should return (B, 68, 2) for each batch
-        return heatmap_to_landmarks_mean(probs) / 224.0
+        # probs = torch.softmax(logits, dim=2)
+        # probs = probs.view(-1, 68, 224, 224)
+        # with torch.no_grad():
+        #     # ensure sum of probs over 224x224 is 1
+        #     sum_over = torch.sum(probs, dim=(2, 3), keepdim=True) # (B, 68, 1, 1)
+        #     assert torch.allclose(sum_over, torch.ones_like(sum_over))
+        # # probs: (B, 68, 224, 224)
+        # # should return (B, 68, 2) for each batch
+        # return heatmap_to_landmarks_mean(probs) / 224.0
