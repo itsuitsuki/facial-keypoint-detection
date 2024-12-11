@@ -23,6 +23,7 @@ UCB CS180 FA24 Final Project 1/3: Facial Keypoint Detection using NN
 ```
 # How to run
 1. Every notebook is corresponding to a part of the project, and can be run independently.
-2. `unet.py` is the implementation of the U-Net model, which is used in the project. Also the aggregation (weighted average) function `heatmap_to_landmarks` is defined in this file.
-3. The iBUG dataset is not included in the repo, but can be downloaded from the project spec or kaggle. IMM Face dataset can also be downloaded through the wayback-ed IMM homepage. The datasets should be placed in the root directory of the project.
-4. The `my_ims` directory contains some images from my collection, which can be used to test the model in part 3 and 4.
+2. In the first part, I write a method for computing the real nose tips as labels by weighted averages, but because this is not explicitly said to be allowed in the project spec, I just preserve the implementation in the notebook and set `REAL_NOSE_TIP = False` to use the provided labels (52-th index).
+3. `unet.py` is the implementation of the U-Net model, which is used in the project. Also the aggregation (weighted average) function `heatmap_to_landmarks` is defined in this file.
+4. The iBUG dataset is not included in the repo, but can be downloaded from the project spec or kaggle. IMM Face dataset can also be downloaded through the wayback-ed IMM homepage. The datasets should be placed in the root directory of the project.
+5. The `my_ims` directory contains some images from my collection, which can be used to test the model in part 3 and 4.
