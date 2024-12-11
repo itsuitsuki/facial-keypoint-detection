@@ -1,2 +1,28 @@
 # facial_keypoint_detect_180
 UCB CS180 FA24 Final Project 1/3: Facial Keypoint Detection using NN
+
+# File Structure
+```
+.
+├── 1
+├── 1_imm_nose_tip_detection.ipynb
+├── 2
+├── 2_full_facial_keyp_detection.ipynb
+├── 3
+├── 3_ibug_facial.ipynb
+├── 4
+├── 4_ibug_heatmap.ipynb
+├── ibug_300W_large_face_landmark_dataset # downloaded from kaggle and project spec
+├── imm_face_db # imm face dataset
+├── my_ims # images from my collection
+│   ├── 1.jpg
+│   ├── 2.jpg
+│   └── 3.jpg
+├── README.md
+└── unet.py
+```
+# How to run
+1. Every notebook is corresponding to a part of the project, and can be run independently.
+2. `unet.py` is the implementation of the U-Net model, which is used in the project. Also the aggregation (weighted average) function `heatmap_to_landmarks` is defined in this file.
+3. The iBUG dataset is not included in the repo, but can be downloaded from the project spec or kaggle. IMM Face dataset can also be downloaded through the wayback-ed IMM homepage. The datasets should be placed in the root directory of the project.
+4. The `my_ims` directory contains some images from my collection, which can be used to test the model in part 3 and 4.
